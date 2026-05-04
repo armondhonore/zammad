@@ -93,12 +93,25 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
     expect_subscriber_avatar(agent2)
   end
 
-  def cursor_home_shortcut
-    mac_platform? ? %i[command up] : %i[control home]
-  end
-
   def cursor_end_shortcut
     mac_platform? ? %i[command down] : %i[control end]
+  end
+
+  # TipTap on macOS does not bind Cmd+Up to "start of document", so
+  # send_keys(cursor_home_shortcut) leaves the caret wherever the click
+  # landed. Drive ProseMirror's selection directly via the DOM Selection API.
+  def move_editor_cursor_to_start
+    page.execute_script(<<~JS)
+      var box = document.querySelector('#ticketArticleReplyForm [role="textbox"]');
+      if (!box) return;
+      box.focus();
+      var range = document.createRange();
+      range.selectNodeContents(box);
+      range.collapse(true);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    JS
   end
 
   def cite_article_text(text)
@@ -145,8 +158,7 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
   end
 
   def insert_text_module_at_top
-    editor = find_editor('Text').input_element
-    editor.click.send_keys(cursor_home_shortcut)
+    move_editor_cursor_to_start
 
     click_editor_toolbar_action('Insert text from text module')
 
@@ -174,8 +186,9 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
   # block between the heading and the first cited blockquote, then format that
   # new block as H2.
   def add_h2_below_top_heading(text)
+    move_editor_cursor_to_start
     editor = find_editor('Text').input_element
-    editor.click.send_keys(cursor_home_shortcut, :end, :enter)
+    editor.send_keys(:end, :enter)
 
     apply_heading_to_current_block('Heading 2')
 
@@ -265,36 +278,77 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
   end
 
   def account_time(type:, minutes:)
+    expect(page).to have_css('#flyout-ticket-time-accounting', text: 'Time accounting')
+
+    # find_select must run unscoped because its dropdown menu is teleported to
+    # the document body. A `within '#flyout-...'` would scope the menu lookup
+    # to the aside and the option click would never find it.
+    find_select('Activity type').select_option(type)
+    find_input('Accounted time').type(minutes)
+
     within '#flyout-ticket-time-accounting' do
-      expect(page).to have_text('Time accounting')
-
-      find_select('Activity type').select_option(type)
-      find_input('Accounted time').type(minutes)
-
       click_on 'Account time'
     end
 
+    # Wait for the second ticketUpdate mutation — the first one failed because
+    # time accounting was missing, the second one (after the flyout) is the
+    # one that actually creates the article. Waiting on this signals that the
+    # form's reset/close handler has run.
+    wait_for_gql('shared/entities/ticket/graphql/mutations/update.graphql', number: 2)
+
     expect(page).to have_text('Ticket updated successfully.')
 
-    expect(ticket.reload.articles.last.preferences['time_accounting']).to be_truthy
+    last_article = ticket.reload.articles.last
+    expect(last_article.ticket_time_accounting).to be_present
+    expect(last_article.ticket_time_accounting.time_unit.to_i).to eq(minutes.to_i)
   end
 
   def add_internal_note_with_mention(agent)
+    # Wait for the previously-sent reply article to settle into the list and
+    # for the previous reply form to be clean before opening a new form, to
+    # avoid racing with the form re-render after the article-type switch.
+    expect(page).to have_css("#article-#{ticket.reload.articles.last.id}")
+    expect(page).to have_no_button('Discard your unsaved changes', wait: 30)
+
     click_on 'Add internal note'
 
+    # Make sure the form has switched to note mode and the editor is ready
+    # before typing — the Mention user toolbar button must be present.
     expect(reply_form).to have_button('Mention user')
 
-    click_editor_toolbar_action('Mention user')
+    editor_input = find_editor('Text').input_element
 
-    find_editor('Text').input_element.send_keys(agent.firstname)
+    # Ensure the editor is focused before sending keys — Selenium's send_keys
+    # does not always implicitly focus the contenteditable when the editor
+    # has just re-initialised.
+    page.execute_script(<<~JS)
+      var box = document.querySelector('#ticketArticleReplyForm [role="textbox"]');
+      if (box) box.focus();
+    JS
 
-    within '[data-test-id="mention-user"]' do
-      find('li[role="option"]', text: agent.fullname).click
+    # Type the "@@" activator first and wait for the mention popup to open
+    # before typing the search query. Splitting the typing this way avoids a
+    # race where the popup hasn't initialised by the time the query chars
+    # arrive, leaving the popup in its empty state.
+    editor_input.send_keys('@@')
+    expect(page).to have_css('[data-test-id="mention-user"]')
+
+    editor_input.send_keys(agent.firstname)
+
+    using_wait_time(10) do
+      expect(page).to have_css('[data-test-id="mention-user"] li[role="option"]', text: agent.fullname)
     end
+    find('[data-test-id="mention-user"] li[role="option"]', text: agent.fullname).click
 
-    expect(reply_form).to have_css('span[data-mention-user-id]', text: agent.fullname)
+    expect(reply_form).to have_css('[data-mention-user-id]', text: agent.fullname)
 
     click_on 'Update'
+
+    # The internal note submission also opens the Time accounting flyout
+    # (because time_accounting is enabled). Skip it.
+    within '#flyout-ticket-time-accounting' do
+      click_on 'Skip'
+    end
 
     expect(page).to have_text('Ticket updated successfully.')
   end
