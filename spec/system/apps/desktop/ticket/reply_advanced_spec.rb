@@ -306,42 +306,39 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
   end
 
   def add_internal_note_with_mention(agent)
-    # Wait for the previously-sent reply article to settle into the list.
+    # Wait for the previously-sent reply article to settle into the list, and
+    # for the reply form to fully tear down. The action panel (with the "Add
+    # internal note" button) and the form panel are mutually-exclusive
+    # branches in ArticleReply.vue, gated on newArticlePresent. The article
+    # appears via subscription before the local newArticlePresent reset
+    # runs, so waiting on the article alone is not enough.
     expect(page).to have_css("#article-#{ticket.reload.articles.last.id}")
+    expect(page).to have_no_css('#ticketArticleReplyForm')
 
     click_on 'Add internal note'
 
-    # Wait until the article-type switch has fully propagated to the form
-    # schema before interacting with the editor. The Channel field shows
-    # "Note" once the new schema is in place, which is a more reliable
-    # signal than the Mention user button alone — and it avoids the
-    # brittleness of an absolute formUpdater call number that depends on
-    # all prior interactions.
-    within(reply_form) do
-      expect(find_select('Channel')).to have_text('Note')
-    end
-    expect(reply_form).to have_button('Mention user')
-    # The editor's inner [role="textbox"] is destroyed and recreated when the
-    # form schema switches from email to note. Wait for it before resolving
-    # find_editor, otherwise field_id can race against the rebuild.
-    expect(reply_form).to have_css('[role="textbox"]')
+    # Wait for the freshly remounted reply form to be ready before
+    # interacting with the editor. The Mention user button is part of the
+    # note-mode toolbar, and [role="textbox"] is the TipTap editor's input —
+    # both render once the form has finished mounting with the note schema.
+    # Use page-level matchers so they re-resolve the form on each retry —
+    # the form was just remounted, so a previously-held reply_form element
+    # handle from before the submission would be stale.
+    expect(page).to have_css('#ticketArticleReplyForm button[aria-label="Mention user"]')
+    expect(page).to have_css('#ticketArticleReplyForm [role="textbox"]')
 
-    # Type the "@@" activator first and wait for the mention popup to open
-    # before typing the search query. Splitting the typing this way avoids a
-    # race where the popup hasn't initialised by the time the query chars
-    # arrive, leaving the popup in its empty state.
-    editor_input = find_editor('Text').input_element
-    editor_input.send_keys('@@')
-    expect(page).to have_css('[data-test-id="mention-user"]')
-
-    editor_input.send_keys(agent.firstname)
+    # Type activator + query in one call — same pattern as shared_drafts_spec
+    # so the mention plugin (200ms debounced) sees a non-empty query at the
+    # debounce boundary. Capybara's default wait then covers debounce +
+    # GraphQL roundtrip.
+    find_editor('Text').input_element.send_keys("@@#{agent.firstname}")
 
     using_wait_time(10) do
       expect(page).to have_css('[data-test-id="mention-user"] li[role="option"]', text: agent.fullname)
     end
     find('[data-test-id="mention-user"] li[role="option"]', text: agent.fullname).click
 
-    expect(reply_form).to have_css('[data-mention-user-id]', text: agent.fullname)
+    expect(page).to have_css('#ticketArticleReplyForm [data-mention-user-id]', text: agent.fullname)
 
     click_on 'Update'
 
