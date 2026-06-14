@@ -60,13 +60,17 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
 
   it 'covers the full editor and advanced features scenario', performs_jobs: true do
     cite_article_text(first_cite)
+
+    # The signature is inserted asynchronously after the reply form opens -
+    # typing before it landed can swallow the keystrokes.
+    wait_for_test_flag('editor.signatureAdd')
+
     find_editor('Text').input_element.send_keys(' First reply text.')
 
     cite_article_text(second_cite)
     find_editor('Text').input_element.send_keys(' Second reply text.')
 
-    # TODO: Re-add toolbar-visible-while-scrolling assertion once the sticky
-    # toolbar layout bug (toolbar hidden behind page header on scroll) is fixed.
+    expect_toolbar_visible_while_scrolling
 
     insert_text_module_at_top
 
@@ -95,25 +99,70 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
     expect_subscriber_avatar(agent2)
   end
 
-  def cursor_end_shortcut
-    mac_platform? ? %i[command down] : %i[control end]
-  end
-
-  # TipTap on macOS does not bind Cmd+Up to "start of document", so
-  # send_keys(cursor_home_shortcut) leaves the caret wherever the click
+  # TipTap on macOS does not bind Cmd+Up / Cmd+Down to "start/end of
+  # document", so sending those shortcuts leaves the caret wherever the click
   # landed. Drive ProseMirror's selection directly via the DOM Selection API.
-  def move_editor_cursor_to_start
+  def move_editor_cursor_to_edge(collapse_to_start)
     page.execute_script(<<~JS)
       var box = document.querySelector('#ticketArticleReplyForm [role="textbox"]');
       if (!box) return;
       box.focus();
       var range = document.createRange();
       range.selectNodeContents(box);
-      range.collapse(true);
+      range.collapse(#{collapse_to_start});
       var sel = window.getSelection();
       sel.removeAllRanges();
       sel.addRange(range);
     JS
+  end
+
+  def move_editor_cursor_to_start
+    move_editor_cursor_to_edge(true)
+  end
+
+  def move_editor_cursor_to_end
+    move_editor_cursor_to_edge(false)
+  end
+
+  # The editor toolbar is sticky below the ticket header. With a draft long
+  # enough to scroll, the toolbar has to stay reachable - fully inside the
+  # viewport and below the header - while scrolling up/down in the draft.
+  def expect_toolbar_visible_while_scrolling
+    editor = find_editor('Text').input_element
+
+    # Make sure the draft includes some lines so it can be scrolled.
+    8.times { |i| editor.send_keys(:enter, "Draft filler line #{i + 1}.") }
+
+    scroll_area = %(document.querySelector('[data-test-id="ticket-detail-content-container"]'))
+
+    page.execute_script("#{scroll_area}.scrollTop = #{scroll_area}.scrollHeight")
+    expect_editor_toolbar_reachable
+
+    page.execute_script("#{scroll_area}.scrollTop -= 150")
+    expect_editor_toolbar_reachable
+
+    page.execute_script("#{scroll_area}.scrollTop = #{scroll_area}.scrollHeight")
+    expect_editor_toolbar_reachable
+  end
+
+  def expect_editor_toolbar_reachable
+    # Retry via wait.until, so transient layout states (e.g. the top bar
+    # swapping between full and clipped details on scroll) do not flake.
+    wait.until do
+      page.evaluate_script(<<~JS)
+        (function () {
+          var toolbar = document.querySelector('#ticketArticleReplyForm [role="toolbar"]');
+          if (!toolbar) return false;
+          var rect = toolbar.getBoundingClientRect();
+          var headerBottom = 0;
+          document.querySelectorAll('[data-test-id="ticket-detail-top-bar-clipped-details"], [data-test-id="ticket-detail-top-bar-full-details"]').forEach(function (header) {
+            var headerRect = header.getBoundingClientRect();
+            if (headerRect.height > 0) headerBottom = Math.max(headerBottom, headerRect.bottom);
+          });
+          return rect.height > 0 && rect.top >= headerBottom - 1 && rect.bottom <= window.innerHeight;
+        })()
+      JS
+    end
   end
 
   def cite_article_text(text)
@@ -224,8 +273,7 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
   end
 
   def insert_table_at_end_of_draft
-    editor = find_editor('Text').input_element
-    editor.click.send_keys(cursor_end_shortcut)
+    move_editor_cursor_to_end
 
     click_editor_toolbar_action('Insert table')
 
@@ -282,6 +330,11 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
   def account_time(type:, minutes:)
     expect(page).to have_css('#flyout-ticket-time-accounting', text: 'Time accounting')
 
+    # Wait for the flyout form to fully settle before interacting - its
+    # initial form updater response rewrites the activity type select
+    # (options), which closes an already-opened dropdown menu.
+    wait_for_form_to_settle('form-ticket-time-accounting')
+
     # find_select must run unscoped because its dropdown menu is teleported to
     # the document body. A `within '#flyout-...'` would scope the menu lookup
     # to the aside and the option click would never find it.
@@ -306,14 +359,16 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
   end
 
   def add_internal_note_with_mention(agent)
-    # Wait for the previously-sent reply article to settle into the list, and
-    # for the reply form to fully tear down. The action panel (with the "Add
-    # internal note" button) and the form panel are mutually-exclusive
-    # branches in ArticleReply.vue, gated on newArticlePresent. The article
-    # appears via subscription before the local newArticlePresent reset
-    # runs, so waiting on the article alone is not enough.
+    # Wait for the previously-sent reply article to settle into the list.
     expect(page).to have_css("#article-#{ticket.reload.articles.last.id}")
-    expect(page).to have_no_css('#ticketArticleReplyForm')
+
+    # The action panel button renders only after the reply form has fully
+    # torn down (form and panel are mutually-exclusive branches in
+    # ArticleReply.vue, gated on newArticlePresent), and the whole block is
+    # additionally v-show-gated on the article list loading state. Waiting
+    # for the button itself covers all of that; the teardown can outlast the
+    # default Capybara wait time.
+    expect(page).to have_button('Add internal note', wait: 30)
 
     click_on 'Add internal note'
 
@@ -327,16 +382,27 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
     expect(page).to have_css('#ticketArticleReplyForm button[aria-label="Mention user"]')
     expect(page).to have_css('#ticketArticleReplyForm [role="textbox"]')
 
-    # Type activator + query in one call — same pattern as shared_drafts_spec
-    # so the mention plugin (200ms debounced) sees a non-empty query at the
-    # debounce boundary. Capybara's default wait then covers debounce +
-    # GraphQL roundtrip.
-    find_editor('Text').input_element.send_keys("@@#{agent.firstname}")
+    # Focus the editor and type activator + query in one call, so the
+    # mention plugin (200ms debounced) sees a non-empty query at the
+    # debounce boundary. The form updater response can remount the editor
+    # and race the typing - swallowing keystrokes or wiping the mention
+    # plugin state - so retype when the suggestion list does not appear.
+    mention_query = "@@#{agent.firstname}"
+    suggestion = '[data-test-id="mention-user"] li[role="option"]'
 
-    using_wait_time(10) do
-      expect(page).to have_css('[data-test-id="mention-user"] li[role="option"]', text: agent.fullname)
+    3.times do |attempt|
+      editor = find_editor('Text').input_element
+      editor.click
+      editor.send_keys(mention_query)
+
+      break if page.has_css?(suggestion, text: agent.fullname, wait: 5)
+      raise 'Mention suggestion list did not appear' if attempt == 2
+
+      # Clear any partially landed query before retyping.
+      editor.send_keys([magic_key, 'a'], :backspace)
     end
-    find('[data-test-id="mention-user"] li[role="option"]', text: agent.fullname).click
+
+    find(suggestion, text: agent.fullname).click
 
     expect(page).to have_css('#ticketArticleReplyForm [data-mention-user-id]', text: agent.fullname)
 
