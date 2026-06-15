@@ -370,7 +370,7 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
     # default Capybara wait time.
     expect(page).to have_button('Add internal note', wait: 30)
 
-    click_on 'Add internal note'
+    click_button_when_centered('Add internal note')
 
     # Wait for the freshly remounted reply form to be ready before
     # interacting with the editor. The Mention user button is part of the
@@ -415,6 +415,33 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
     end
 
     expect(page).to have_text('Ticket updated successfully.')
+  end
+
+  def click_button_when_centered(label)
+    button = find('button', text: label, exact_text: true)
+
+    button.execute_script(<<~JS)
+      this.scrollIntoView({ block: 'center', inline: 'center' });
+    JS
+
+    wait.until do
+      button.evaluate_script(<<~JS)
+        (function(element) {
+          const rect = element.getBoundingClientRect();
+          const centerX = rect.left + rect.width / 2;
+          const centerY = rect.top + rect.height / 2;
+
+          if (centerX < 0 || centerY < 0 || centerX > window.innerWidth || centerY > window.innerHeight) {
+            return false;
+          }
+
+          const centerElement = document.elementFromPoint(centerX, centerY);
+          return centerElement === element || element.contains(centerElement);
+        })(this)
+      JS
+    end
+
+    button.click
   end
 
   def expect_subscriber_avatar(agent)
