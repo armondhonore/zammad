@@ -420,9 +420,7 @@ RSpec.describe 'Desktop > Ticket > Editor and Advanced Features', app: :desktop_
   def click_button_when_centered(label)
     button = find('button', text: label, exact_text: true)
 
-    button.execute_script(<<~JS)
-      this.scrollIntoView({ block: 'center', inline: 'center' });
-    JS
+    page.scroll_to(button, align: :center)
 
     wait.until do
       button.evaluate_script(<<~JS)
