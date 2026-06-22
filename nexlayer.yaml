@@ -1,0 +1,31 @@
+application:
+  name: zammad
+  pods:
+  - name: app
+    image: ghcr.io/zammad/zammad:latest
+    path: /
+    servicePorts:
+    - 8080
+    vars:
+      RAILS_ENV: production
+      REDIS_URL: "redis://redis.pod:6379"
+      DATABASE_URL: "postgresql://zammad:zammad@postgres.pod:5432/zammad"
+      ELASTICSEARCH_HOST: "localhost"
+      ZAMMAD_RAILSSERVER_HOST: "0.0.0.0"
+      ZAMMAD_WEBSOCKET_HOST: "0.0.0.0"
+  - name: postgres
+    image: postgres:16-alpine
+    servicePorts:
+    - 5432
+    vars:
+      POSTGRES_DB: zammad
+      POSTGRES_USER: zammad
+      POSTGRES_PASSWORD: zammad
+    volumes:
+    - name: zammad-db
+      mountPath: /var/lib/postgresql/data
+      size: 10Gi
+  - name: redis
+    image: redis:7-alpine
+    servicePorts:
+    - 6379
