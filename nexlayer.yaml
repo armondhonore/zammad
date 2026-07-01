@@ -14,7 +14,7 @@ application:
       ZAMMAD_RAILSSERVER_HOST: "0.0.0.0"
       ZAMMAD_WEBSOCKET_HOST: "0.0.0.0"
   - name: postgres
-    image: postgres:16-alpine
+    image: mirror.gcr.io/library/postgres:16-alpine
     servicePorts:
     - 5432
     vars:
@@ -26,6 +26,6 @@ application:
       mountPath: /var/lib/postgresql/data
       size: 10Gi
   - name: redis
-    image: redis:7-alpine
+    image: mirror.gcr.io/library/redis:7-alpine
     servicePorts:
     - 6379
